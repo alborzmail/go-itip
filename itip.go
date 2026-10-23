@@ -26,6 +26,7 @@ const (
 const ProductID = "-//alborzmail//go-itip//EN"
 
 var (
+	ErrUID        = errors.New("itip: missing or inconsistent event UID")
 	ErrOrganizer  = errors.New("itip: not from the event's organizer")
 	ErrOutdated   = errors.New("itip: for another revision of the event")
 	ErrSuperseded = errors.New("itip: a later answer from this attendee is already applied")
@@ -260,7 +261,18 @@ func Reply(request *ical.Calendar, attendee, partstat string, now time.Time) (*i
 }
 
 // Apply takes a message into the stored copy of its event, nil for none; the result is nil when nothing remains.
+// Every event must have one nonempty UID, identical across the message and
+// stored series. Invalid identities return ErrUID before applying any method.
 func Apply(stored, msg *ical.Calendar) (*ical.Calendar, error) {
+	uid, err := calendarUID(msg)
+	if err != nil {
+		return nil, err
+	}
+	if stored != nil {
+		if held, err := calendarUID(stored); err != nil || held != uid {
+			return nil, ErrUID
+		}
+	}
 	switch Method(msg) {
 	case MethodRequest, MethodPublish:
 		return applyRequest(stored, msg)
@@ -270,6 +282,32 @@ func Apply(stored, msg *ical.Calendar) (*ical.Calendar, error) {
 		return applyReply(stored, msg)
 	}
 	return nil, fmt.Errorf("itip: method %q not handled", Method(msg))
+}
+
+func eventUID(event *ical.Component) (string, error) {
+	if len(event.Props[ical.PropUID]) != 1 {
+		return "", ErrUID
+	}
+	uid, err := event.Props.Text(ical.PropUID)
+	if err != nil || uid == "" {
+		return "", ErrUID
+	}
+	return uid, nil
+}
+
+func calendarUID(cal *ical.Calendar) (string, error) {
+	if cal == nil || len(cal.Events()) == 0 {
+		return "", ErrUID
+	}
+	var uid string
+	for _, event := range cal.Events() {
+		value, err := eventUID(event.Component)
+		if err != nil || (uid != "" && uid != value) {
+			return "", ErrUID
+		}
+		uid = value
+	}
+	return uid, nil
 }
 
 func applyRequest(stored, msg *ical.Calendar) (*ical.Calendar, error) {
@@ -391,8 +429,10 @@ func instanceKey(comp *ical.Component) string {
 
 func sameInstance(event *ical.Component) func(*ical.Component) bool {
 	key := instanceKey(event)
+	uid, err := eventUID(event)
 	return func(child *ical.Component) bool {
-		return child.Name == ical.CompEvent && instanceKey(child) == key
+		childUID, childErr := eventUID(child)
+		return err == nil && childErr == nil && childUID == uid && child.Name == ical.CompEvent && instanceKey(child) == key
 	}
 }
 
